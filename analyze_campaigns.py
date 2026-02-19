@@ -5,10 +5,32 @@ Shows how to analyze the exported CSV
 """
 
 import csv
+import os
+import glob
 from collections import defaultdict
 from datetime import datetime
 
-def analyze_campaigns(filename="klaviyo_campaigns_export.csv"):
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+RESULTS_DIR = os.path.join(SCRIPT_DIR, 'results')
+
+
+def get_latest_csv():
+    """Find the most recent CSV file in results folder."""
+    pattern = os.path.join(RESULTS_DIR, 'klaviyo_campaigns_export_*.csv')
+    files = glob.glob(pattern)
+    if files:
+        return max(files, key=os.path.getmtime)
+    # Fallback to old location
+    old_file = os.path.join(SCRIPT_DIR, 'klaviyo_campaigns_export.csv')
+    if os.path.exists(old_file):
+        return old_file
+    raise FileNotFoundError("No campaign CSV found. Run export_campaigns.py first.")
+
+
+def analyze_campaigns(filename=None):
+    if filename is None:
+        filename = get_latest_csv()
+    print(f"Analyzing: {filename}\n")
     """
     Load and analyze campaign data from CSV.
     """

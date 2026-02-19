@@ -19,6 +19,11 @@ import os
 # Try to import from config file, fall back to defaults
 try:
     from config import API_KEY, BASE_URL, REVISION, MONTHS_BACK, OUTPUT_FILENAME, RATE_LIMIT_DELAY
+    try:
+        from config import START_DATE, END_DATE
+    except ImportError:
+        START_DATE = None
+        END_DATE = None
 except ImportError:
     # Configuration (edit these or create a config.py file)
     API_KEY = os.getenv("KLAVIYO_API_KEY", "YOUR_API_KEY_HERE")
@@ -27,6 +32,8 @@ except ImportError:
     MONTHS_BACK = 6
     OUTPUT_FILENAME = "klaviyo_campaigns_export.csv"
     RATE_LIMIT_DELAY = 30.0  # 30 second between requests
+    START_DATE = None
+    END_DATE = None
 
 # Headers for API requests
 HEADERS = {
@@ -83,19 +90,27 @@ def get_campaigns_with_messages() -> List[Dict]:
     """
     Fetch all email campaigns from the last X months with their message details.
     """
-    print(f"Fetching campaigns from the last {MONTHS_BACK} months...")
-
-    # Calculate date X months ago (make it timezone-aware to match Klaviyo's dates)
     from datetime import timezone
-    months_ago = datetime.now(timezone.utc) - timedelta(days=30 * MONTHS_BACK)
+
+    # Determine date range
+    if START_DATE and END_DATE:
+        print(f"Fetching campaigns from {START_DATE} to {END_DATE}...")
+        range_start = datetime.strptime(START_DATE, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        range_end = datetime.strptime(END_DATE, "%Y-%m-%d").replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+    else:
+        print(f"Fetching campaigns from the last {MONTHS_BACK} months...")
+        range_start = datetime.now(timezone.utc) - timedelta(days=30 * MONTHS_BACK)
+        range_end = datetime.now(timezone.utc)
     
     campaigns_data = []
     tag_names = {}  # Map tag IDs to tag names (collected across all pages)
     url = f"{BASE_URL}/campaigns/"
 
     # Filter for email campaigns and include campaign messages and tags
+    # Add date filter to API request so Klaviyo returns campaigns from the right period
+    date_filter = f",greater-or-equal(created_at,{range_start.strftime('%Y-%m-%dT%H:%M:%S')}Z),less-or-equal(created_at,{range_end.strftime('%Y-%m-%dT%H:%M:%S')}Z)"
     params = {
-        "filter": "equals(messages.channel,'email')",
+        "filter": f"and(equals(messages.channel,'email'){date_filter})",
         "include": "campaign-messages,tags"
     }
 
@@ -170,8 +185,18 @@ def get_campaigns_with_messages() -> List[Dict]:
         if "tag_ids" in campaign_info:
             del campaign_info["tag_ids"]  # Remove tag IDs, keep only names
 
-    # Filter to only campaigns from last X months with "sent" status
-    print(f"Filtering for SENT campaigns after: {months_ago.strftime('%Y-%m-%d %H:%M:%S')}")
+    # Debug: show the date range of fetched campaigns
+    all_dates = []
+    for c in campaigns_data:
+        dt = c.get("send_time") or c.get("created_at")
+        if dt:
+            all_dates.append(dt[:10])
+    if all_dates:
+        print(f"DEBUG: Fetched campaigns date range: {min(all_dates)} to {max(all_dates)}")
+        print(f"DEBUG: Statuses found: {set(c.get('status') for c in campaigns_data)}")
+
+    # Filter to only sent campaigns within the date range
+    print(f"Filtering for SENT campaigns between: {range_start.strftime('%Y-%m-%d')} and {range_end.strftime('%Y-%m-%d')}")
     filtered_campaigns = []
     no_date_count = 0
     parse_error_count = 0
@@ -185,7 +210,7 @@ def get_campaigns_with_messages() -> List[Dict]:
         if campaign.get("send_time"):
             try:
                 send_date = datetime.fromisoformat(campaign["send_time"].replace("Z", "+00:00"))
-                if send_date >= months_ago:
+                if range_start <= send_date <= range_end:
                     filtered_campaigns.append(campaign)
             except Exception as e:
                 # If we can't parse the date, skip it (don't include)
@@ -195,7 +220,7 @@ def get_campaigns_with_messages() -> List[Dict]:
             # Fall back to created_at if send_time not available
             try:
                 created_date = datetime.fromisoformat(campaign["created_at"].replace("Z", "+00:00"))
-                if created_date >= months_ago:
+                if range_start <= created_date <= range_end:
                     filtered_campaigns.append(campaign)
             except Exception as e:
                 parse_error_count += 1
@@ -209,8 +234,9 @@ def get_campaigns_with_messages() -> List[Dict]:
         print(f"Skipped {parse_error_count} campaigns due to date parsing errors")
     if no_date_count > 0:
         print(f"Skipped {no_date_count} campaigns with no send_time or created_at")
-    
-    print(f"Total fetched: {len(campaigns_data)} | After filtering: {len(filtered_campaigns)} campaigns from the last {MONTHS_BACK} months")
+
+    date_range_label = f"{START_DATE} to {END_DATE}" if START_DATE and END_DATE else f"last {MONTHS_BACK} months"
+    print(f"Total fetched: {len(campaigns_data)} | After filtering: {len(filtered_campaigns)} campaigns ({date_range_label})")
     if len(campaigns_data) > len(filtered_campaigns):
         print(f"Filtered out {len(campaigns_data) - len(filtered_campaigns)} campaigns outside the date range")
     return filtered_campaigns
@@ -230,7 +256,7 @@ def get_campaign_stats(campaign_id: str, campaign_name: str, metric_id: str, ret
             "type": "campaign-values-report",
             "attributes": {
                 "timeframe": {
-                    "key": "last_7_days"
+                    "key": "last_365_days"
                 },
                 "filter": f'equals(campaign_id,"{campaign_id}")',
                 "statistics": [
@@ -290,7 +316,7 @@ def get_campaign_stats(campaign_id: str, campaign_name: str, metric_id: str, ret
             "bounced": 0,
             "delivered": 0
         }
-    
+
     data = response.json()
     
     # Extract statistics
@@ -309,7 +335,7 @@ def get_campaign_stats(campaign_id: str, campaign_name: str, metric_id: str, ret
             "bounced": stats.get("bounced", 0),
             "delivered": stats.get("delivered", 0)
         }
-    
+
     return {
         "recipients": 0,
         "opens": 0,
@@ -387,6 +413,23 @@ def export_to_csv(campaigns: List[Dict], filename: str = None):
     print(f"\nExported to {filename}")
 
 
+def get_output_filepath(extension: str = "csv") -> str:
+    """
+    Generate output filepath with date range or months.
+    """
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    results_dir = os.path.join(script_dir, "results")
+    os.makedirs(results_dir, exist_ok=True)
+
+    if START_DATE and END_DATE:
+        # Use date range in filename (e.g., 2024-12-01_to_2024-12-31)
+        filename = f"klaviyo_campaigns_export_{START_DATE}_to_{END_DATE}.{extension}"
+    else:
+        date_str = datetime.now().strftime("%Y%m%d")
+        filename = f"klaviyo_campaigns_export_{date_str}_{MONTHS_BACK}_months.{extension}"
+    return os.path.join(results_dir, filename)
+
+
 def main():
     """
     Main execution function.
@@ -395,7 +438,7 @@ def main():
     print("Klaviyo Campaign Export Tool")
     print("=" * 60)
     print()
-    
+
     # Check if API key is set
     if API_KEY == "YOUR_API_KEY_HERE" or not API_KEY:
         print("ERROR: Please set your API key")
@@ -404,7 +447,7 @@ def main():
         print("  2. Copy config.example.py to config.py and add your API key")
         print("  3. Edit API_KEY variable at the top of this script")
         return
-    
+
     # Step 1: Get all campaigns with their messages
     campaigns = get_campaigns_with_messages()
 
@@ -428,8 +471,9 @@ def main():
         time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
 
     # Step 4: Export to CSV
+    output_file = get_output_filepath("csv")
     print("\nExporting data...")
-    export_to_csv(campaigns)
+    export_to_csv(campaigns, output_file)
     
     # Print summary
     print("\n" + "=" * 60)

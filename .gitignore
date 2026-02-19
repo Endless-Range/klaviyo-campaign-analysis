@@ -1,6 +1,13 @@
 # Klaviyo API Configuration
 config.py
+segment_overlap.py
+
+# CSV exports (contains customer emails)
+csv_exports/
 klaviyo_campaigns_export.csv
+
+# Results output
+results/
 
 # Python
 __pycache__/
