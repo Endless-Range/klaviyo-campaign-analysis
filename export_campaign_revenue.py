@@ -13,11 +13,18 @@ from datetime import datetime, timedelta
 # Import configuration
 try:
     from config import API_KEY, BASE_URL, REVISION, MONTHS_BACK
+    try:
+        from config import START_DATE, END_DATE
+    except ImportError:
+        START_DATE = None
+        END_DATE = None
 except ImportError:
     API_KEY = os.getenv("KLAVIYO_API_KEY", "YOUR_API_KEY_HERE")
     BASE_URL = "https://a.klaviyo.com/api"
     REVISION = "2024-10-15"
     MONTHS_BACK = 3
+    START_DATE = None
+    END_DATE = None
 
 HEADERS = {
     "Authorization": f"Klaviyo-API-Key {API_KEY}",
@@ -101,19 +108,6 @@ def get_campaigns():
                 "send_time": row["send_time"]
             })
 
-    # Fetch message IDs for each campaign
-    print(f"\nFetching message IDs for {len(campaigns)} campaigns...")
-    for i, campaign in enumerate(campaigns):
-        message_id = get_campaign_message_id(campaign["campaign_id"])
-        campaign["message_id"] = message_id
-        if (i + 1) % 10 == 0:
-            print(f"  {i + 1}/{len(campaigns)} done...")
-        time.sleep(0.5)  # Rate limiting
-
-    # Show how many have message IDs
-    with_msg = sum(1 for c in campaigns if c.get("message_id"))
-    print(f"Found message IDs for {with_msg}/{len(campaigns)} campaigns")
-
     return campaigns
 
 
@@ -180,8 +174,8 @@ def get_all_campaign_revenue(metric_id, start_date, end_date):
         sum_val = measurements.get("sum_value", [0])
         count_val = measurements.get("count", [0])
 
-        revenue = sum_val[0] if isinstance(sum_val, list) else sum_val
-        orders = count_val[0] if isinstance(count_val, list) else count_val
+        revenue = sum(sum_val) if isinstance(sum_val, list) else sum_val
+        orders = sum(count_val) if isinstance(count_val, list) else count_val
 
         revenue_by_campaign[message_id] = {
             "revenue": round(float(revenue or 0), 2),
@@ -244,18 +238,18 @@ def get_campaign_revenue(campaign_id, campaign_name, metric_id, start_date, end_
 
     if results:
         measurements = results[0].get("measurements", {})
-        # Values come as lists, extract first element
+        # Values come as lists of daily buckets, sum all elements
         sum_val = measurements.get("sum_value", [0])
         count_val = measurements.get("count", [0])
 
         # Handle list or direct value
         if isinstance(sum_val, list):
-            revenue = sum_val[0] if sum_val else 0
+            revenue = sum(sum_val) if sum_val else 0
         else:
             revenue = sum_val or 0
 
         if isinstance(count_val, list):
-            orders = count_val[0] if count_val else 0
+            orders = sum(count_val) if count_val else 0
         else:
             orders = count_val or 0
 
@@ -287,8 +281,15 @@ def main():
     print(f"\nFound {len(campaigns)} campaigns")
 
     # Date range for attribution
-    end_date = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    start_date = (datetime.now() - timedelta(days=30 * MONTHS_BACK)).strftime("%Y-%m-%dT%H:%M:%S")
+    # Extend end date by 30 days to capture orders attributed to campaigns
+    # that were placed after the campaign period ended
+    if START_DATE and END_DATE:
+        start_date = f"{START_DATE}T00:00:00"
+        attribution_end = datetime.strptime(END_DATE, "%Y-%m-%d") + timedelta(days=30)
+        end_date = attribution_end.strftime("%Y-%m-%dT23:59:59")
+    else:
+        end_date = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        start_date = (datetime.now() - timedelta(days=30 * MONTHS_BACK)).strftime("%Y-%m-%dT%H:%M:%S")
 
     print(f"Attribution window: {start_date[:10]} to {end_date[:10]}")
     print()
@@ -304,6 +305,19 @@ def main():
             print(f"  {msg_id}: ${revenue_data[msg_id]['revenue']:,.2f}")
         print()
 
+    # Debug: compare ID formats
+    if revenue_data and campaigns:
+        sample_revenue_ids = list(revenue_data.keys())[:5]
+        sample_campaign_ids = [c.get("campaign_id") for c in campaigns[:5]]
+        print(f"DEBUG: Revenue keys (sample):    {sample_revenue_ids}")
+        print(f"DEBUG: Campaign IDs (sample):    {sample_campaign_ids}")
+        overlap = set(revenue_data.keys()) & set(c.get("campaign_id") for c in campaigns)
+        print(f"DEBUG: Overlapping IDs:          {len(overlap)} of {len(campaigns)} campaigns")
+        if overlap:
+            sample_id = list(overlap)[0]
+            print(f"DEBUG: Raw revenue_data for {sample_id}: {revenue_data[sample_id]}")
+        print()
+
     # Match revenue to campaigns using message IDs
     print("Matching revenue to campaigns...")
     print("-" * 60)
@@ -313,13 +327,14 @@ def main():
     matched_count = 0
 
     for campaign in campaigns:
-        message_id = campaign.get("message_id")
+        campaign_id = campaign.get("campaign_id")
         campaign["revenue"] = 0
         campaign["orders"] = 0
 
-        if message_id and message_id in revenue_data:
-            campaign["revenue"] = revenue_data[message_id]["revenue"]
-            campaign["orders"] = revenue_data[message_id]["orders"]
+        # Match on campaign_id — Klaviyo's $attributed_message returns campaign IDs
+        if campaign_id and campaign_id in revenue_data:
+            campaign["revenue"] = revenue_data[campaign_id]["revenue"]
+            campaign["orders"] = revenue_data[campaign_id]["orders"]
             matched_count += 1
 
         total_revenue += campaign["revenue"]
@@ -332,11 +347,14 @@ def main():
 
     # Export to CSV
     os.makedirs(RESULTS_DIR, exist_ok=True)
-    date_str = datetime.now().strftime("%Y%m%d")
-    output_file = os.path.join(RESULTS_DIR, f"klaviyo_campaign_revenue_{date_str}_{MONTHS_BACK}_months.csv")
+    if START_DATE and END_DATE:
+        output_file = os.path.join(RESULTS_DIR, f"klaviyo_campaign_revenue_{START_DATE}_to_{END_DATE}.csv")
+    else:
+        date_str = datetime.now().strftime("%Y%m%d")
+        output_file = os.path.join(RESULTS_DIR, f"klaviyo_campaign_revenue_{date_str}_{MONTHS_BACK}_months.csv")
 
     with open(output_file, 'w', newline='', encoding='utf-8') as f:
-        writer = csv.DictWriter(f, fieldnames=["campaign_id", "campaign_name", "subject", "send_time", "revenue", "orders"])
+        writer = csv.DictWriter(f, fieldnames=["campaign_id", "campaign_name", "subject", "send_time", "revenue", "orders"], extrasaction='ignore')
         writer.writeheader()
         for campaign in campaigns:
             writer.writerow(campaign)
