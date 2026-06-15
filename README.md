@@ -1,13 +1,17 @@
 # Klaviyo Campaign Export Tool
 
-A Python script to export Klaviyo email campaign performance data including subject lines, sends, opens, and clicks. Perfect for analyzing campaign performance, creating reports, or building dashboards.
+A Python toolkit to export Klaviyo email campaign performance data — subject
+lines, sends, opens, clicks, and revenue — and turn it into ready-to-share PNG
+charts. Run one command (`python3 run_all.py`) to go from API to dashboard.
 
 ## Features
 
-✅ Export campaign data from the last 6 months (or custom date range)  
-✅ Get complete campaign details: subject lines, send times, sender info  
-✅ Pull performance metrics: opens, clicks, bounces, delivery rates  
-✅ Bonus analysis script with insights and benchmarks  
+✅ Export campaign data for a custom date range (or the last N months)  
+✅ Get complete campaign details: subject lines, send times, sender info, tags  
+✅ Pull performance metrics: opens, clicks, bounces, delivery rates, revenue  
+✅ **Generate PNG charts**: a 9-panel performance dashboard + a category breakdown  
+✅ One-command pipeline (`run_all.py`) that exports and charts in one go  
+✅ Bonus console analysis scripts with insights and benchmarks  
 ✅ Export to CSV for easy analysis in Excel, Python, or BI tools
 
 ## Setup
@@ -44,35 +48,103 @@ A Python script to export Klaviyo email campaign performance data including subj
 
 ## Usage
 
-Run the script:
+### Quick start: run the full pipeline
+
+The easiest way to export **and** chart your campaigns is the pipeline runner:
+
 ```bash
-python3 export_campaigns.py
+python3 run_all.py
 ```
 
-The script will:
-1. Fetch all email campaigns from the last 6 months
-2. Get performance stats for each campaign
-3. Export everything to `klaviyo_campaigns_export.csv`
+This runs four steps in order and writes all output to the `results/` folder:
+
+1. `export_campaigns.py` — fetch campaigns + performance stats → CSV
+2. `export_campaign_revenue.py` — fetch revenue attribution → CSV
+3. `campaign_report.py` — generate the campaign performance dashboard → PNG
+4. `category_report.py` — generate the category breakdown chart → PNG
+
+When it finishes, open the `results/` folder to see your CSVs and PNG charts.
+
+### Running steps individually
+
+You don't have to run the whole pipeline. Each script can be run on its own
+(the report scripts automatically pick up the most recent CSV in `results/`):
+
+```bash
+python3 export_campaigns.py          # 1. Export campaign data (run this first)
+python3 export_campaign_revenue.py   # 2. Export revenue (needed for revenue chart)
+python3 campaign_report.py           # 3. Build the performance dashboard PNG
+python3 category_report.py           # 4. Build the category breakdown PNG
+```
+
+> The report scripts (`campaign_report.py`, `category_report.py`) only read the
+> CSVs in `results/` — they do **not** call the Klaviyo API. So once you've
+> exported, you can re-run them as many times as you like without hitting rate
+> limits.
 
 ## Configuration
 
-You can customize the export by editing `config.py`:
+Customize the export by editing `config.py`:
 
 ```python
-MONTHS_BACK = 6              # How many months of campaigns to export
-OUTPUT_FILENAME = "..."      # CSV output filename  
-RATE_LIMIT_DELAY = 0.2       # Delay between API calls (seconds)
+API_KEY = "pk_..."           # Your Klaviyo Private API key
+
+# Choose the time window (see below):
+MONTHS_BACK = 6              # Export the last N months of campaigns
+START_DATE  = "2026-04-01"   # ...OR an explicit date range (overrides MONTHS_BACK)
+END_DATE    = "2026-04-30"
+
+RATE_LIMIT_DELAY = 1.0       # Delay between API calls in seconds
 ```
+
+**Picking a date range:**
+
+- Set **both** `START_DATE` and `END_DATE` (format `YYYY-MM-DD`) to export a
+  specific window. This takes priority and is what shows up in the chart titles
+  and output filenames.
+- Leave `START_DATE`/`END_DATE` as `None` to fall back to `MONTHS_BACK`.
+
+All scripts in the pipeline read the same `config.py`, so changing the date
+range in one place re-points the entire export + chart workflow.
 
 ## Output
 
-The CSV includes:
+Everything lands in the `results/` folder, named after your date range so
+exports don't overwrite each other:
+
+| File | Produced by | What it is |
+| --- | --- | --- |
+| `klaviyo_campaigns_export_<range>.csv` | `export_campaigns.py` | One row per campaign with all performance metrics (see below) |
+| `klaviyo_campaign_revenue_<range>.csv` | `export_campaign_revenue.py` | Revenue + order count attributed to each campaign |
+| `klaviyo_campaigns_export_<range>.png` | `campaign_report.py` | **Performance dashboard** (9 panels) |
+| `category_report_<range>.png` | `category_report.py` | **Category breakdown** (open rate, click rate, revenue) |
+
+### The charts
+
+**Performance dashboard** (`campaign_report.py`) — a 9-panel image covering:
+open-rate distribution, open rate by day of week, open rate by send hour,
+subject-line feature impact (emoji / %, numbers / urgency words / colon),
+performance by product category, open rate by list size, a top-5 campaigns
+table, open rate by subject length, and a key-insights summary.
+
+**Category breakdown** (`category_report.py`) — a landscape image with three
+side-by-side panels comparing **open rate**, **click rate**, and **total
+revenue** across product categories (THCA, CBD, Delta 8, Wholesale, Promotion).
+
+> Categories are derived from each campaign's **tags** in Klaviyo (the `tags`
+> column in the CSV). If your campaigns aren't tagged, the category panels will
+> be empty — tag them in Klaviyo, then re-export.
+
+### CSV columns
+
+The main campaign CSV includes:
 - Campaign ID and Name
 - Subject Line
 - Status (sent, draft, etc.)
 - Send Time
 - From Name/Email
 - Preview Text
+- Tags
 - Recipients (total attempted sends)
 - Delivered
 - Bounced
@@ -112,16 +184,49 @@ The CSV includes:
 
 ## Analyzing the Data
 
-Once exported, you can:
-- Open in Excel/Google Sheets for quick analysis
-- Load into Python with pandas:
+After exporting (`export_campaigns.py` or `run_all.py`), you have several ways
+to dig in:
+
+### Generate the visual reports
+
+```bash
+python3 campaign_report.py    # 9-panel performance dashboard PNG
+python3 category_report.py    # category open/click/revenue breakdown PNG
+```
+
+Both also print a detailed text summary to the console and save the chart to
+`results/`. These are the scripts to use when someone asks for "charts."
+
+### Quick text analysis (no charts)
+
+```bash
+python3 analyze_campaigns.py
+```
+
+Prints overall stats, top/bottom campaigns by open and click rate, subject-line
+insights, and engagement/deliverability numbers for the latest export — handy
+for a fast read without opening an image.
+
+### Specialized reports
+
+- **`monthly_coupon_report.py`** — analyzes "Monthly Coupon" campaigns to see
+  whether audience segmentation reduces unsubscribes. Fetches its own data and
+  saves a PNG to `results/`.
+- **`analyze_segments.py`** — pulls Klaviyo segment sizes (and optional
+  overlaps) to console.
+
+### Roll your own
+
+The CSVs are standard, so you can also:
+- Open them in Excel / Google Sheets for ad-hoc analysis
+- Load them into Python with pandas (point at the file in `results/`):
   ```python
-  import pandas as pd
-  df = pd.read_csv('klaviyo_campaigns_export.csv')
+  import pandas as pd, glob, os
+  latest = max(glob.glob('results/klaviyo_campaigns_export_*.csv'), key=os.path.getmtime)
+  df = pd.read_csv(latest)
   print(df.describe())
   ```
-- Import into your database
-- Use for reporting/dashboards
+- Import them into a database or BI tool
 
 ## Contributing
 
